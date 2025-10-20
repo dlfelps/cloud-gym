@@ -240,31 +240,43 @@ class TaskGenerator:
         # Actual duration varies (±20% from estimate)
         actual_duration = max(1, int(estimated_duration * self.rng.uniform(0.8, 1.2)))
 
-        # Sample resource requirements (correlated with duration)
-        base_cpu = self.rng.uniform(1.0, 8.0)
-        base_memory = self.rng.uniform(2.0, 32.0)
+        # Sample resource requirements (DISCRETE INTEGERS for discrete state space)
+        # This makes the entire observation space discrete!
+        base_cpu = float(self.rng.integers(1, 9))     # 1-8 cores (discrete)
+        base_memory = float(self.rng.integers(2, 33)) # 2-32 GB (discrete)
 
         # High priority tasks tend to need more resources
         if priority == Priority.HIGH:
-            base_cpu *= 1.5
-            base_memory *= 1.5
+            base_cpu = min(16.0, base_cpu * 1.5)  # Scale up but cap at max
+            base_memory = min(64.0, base_memory * 1.5)
 
-        # Calculate deadline based on priority
+        # Round to integers to maintain discrete space
+        base_cpu = float(int(base_cpu))
+        base_memory = float(int(base_memory))
+
+        # Calculate deadline based on priority (AGGRESSIVE - accounts for queueing)
+        # Key insight: deadline must account for potential queueing delays
+        # Real-world: SLA is from arrival, not from start of execution
         deadline = None
         if priority == Priority.HIGH:
-            # Tight deadline: 1.5x estimated duration
-            deadline = arrival_time + int(estimated_duration * 1.5)
+            # VERY tight: only 1.05x estimated (5% slack)
+            # With ±20% duration variance + queueing, this will cause violations
+            deadline = arrival_time + max(2, int(estimated_duration * 1.05))
         elif priority == Priority.MEDIUM:
-            # Moderate deadline: 3x estimated duration
-            deadline = arrival_time + int(estimated_duration * 3.0)
-        # LOW priority has no deadline
+            # Tight: 1.2x estimated (20% slack)
+            # Still challenging with queueing delays
+            deadline = arrival_time + max(3, int(estimated_duration * 1.2))
+        else:  # LOW priority
+            # Moderate: 2.0x estimated duration
+            # Relaxed but still trackable
+            deadline = arrival_time + max(5, int(estimated_duration * 2.0))
 
         return Task(
             task_id=task_id,
             cpu_required=base_cpu,
             memory_required=base_memory,
-            disk_required=self.rng.uniform(10.0, 100.0),
-            bandwidth_required=self.rng.uniform(50.0, 500.0),
+            disk_required=float(self.rng.integers(10, 101)),  # 10-100 GB (discrete)
+            bandwidth_required=float(self.rng.integers(1, 11) * 50),  # 50-500 Mbps in steps of 50 (discrete)
             estimated_duration=estimated_duration,
             actual_duration=actual_duration,
             remaining_duration=actual_duration,

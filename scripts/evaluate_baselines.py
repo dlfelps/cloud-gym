@@ -139,6 +139,8 @@ class PolicyEvaluator:
         completed_tasks = [m['completed_tasks'] for m in episode_metrics]
         rejected_tasks = [m['rejected_tasks'] for m in episode_metrics]
         sla_violations = [m['sla_violations'] for m in episode_metrics]
+        tasks_with_deadlines = [m.get('tasks_with_deadlines', 0) for m in episode_metrics]
+        deadline_met = [m.get('deadline_met', 0) for m in episode_metrics]
         energy_costs = [m['total_energy_cost'] for m in episode_metrics]
         vm_costs = [m['total_vm_cost'] for m in episode_metrics]
 
@@ -146,9 +148,23 @@ class PolicyEvaluator:
         completion_rates = [
             c / t if t > 0 else 0 for c, t in zip(completed_tasks, total_tasks)
         ]
+
+        # FIXED: SLA success rate only counts tasks with deadlines
         sla_satisfaction_rates = [
-            1.0 - (v / c) if c > 0 else 1.0
-            for v, c in zip(sla_violations, completed_tasks)
+            (dm / twd) if twd > 0 else 1.0
+            for dm, twd in zip(deadline_met, tasks_with_deadlines)
+        ]
+
+        sla_violation_rates = [
+            (v / twd) if twd > 0 else 0.0
+            for v, twd in zip(sla_violations, tasks_with_deadlines)
+        ]
+
+        # BETTER METRIC: Overall task success rate (completed with SLA / total with deadlines)
+        # This accounts for rejections - rejected tasks with deadlines count as failures
+        overall_sla_success_rates = [
+            (dm / tt) if tt > 0 else 0.0  # deadline_met / total_tasks
+            for dm, tt in zip(deadline_met, total_tasks)
         ]
 
         results = {
@@ -165,10 +181,17 @@ class PolicyEvaluator:
             'mean_rejected_tasks': float(np.mean(rejected_tasks)),
             'mean_completion_rate': float(np.mean(completion_rates)),
             'std_completion_rate': float(np.std(completion_rates)),
-            # SLA statistics
+            # SLA statistics (FIXED)
+            'mean_tasks_with_deadlines': float(np.mean(tasks_with_deadlines)),
+            'mean_deadline_met': float(np.mean(deadline_met)),
             'mean_sla_violations': float(np.mean(sla_violations)),
             'mean_sla_satisfaction_rate': float(np.mean(sla_satisfaction_rates)),
             'std_sla_satisfaction_rate': float(np.std(sla_satisfaction_rates)),
+            'mean_sla_violation_rate': float(np.mean(sla_violation_rates)),
+            'std_sla_violation_rate': float(np.std(sla_violation_rates)),
+            # BETTER: Overall SLA success (includes rejected tasks as failures)
+            'mean_overall_sla_success': float(np.mean(overall_sla_success_rates)),
+            'std_overall_sla_success': float(np.std(overall_sla_success_rates)),
             # Cost statistics
             'mean_energy_cost': float(np.mean(energy_costs)),
             'mean_vm_cost': float(np.mean(vm_costs)),
@@ -210,13 +233,22 @@ def main():
     # Create output directory
     Path(args.output_dir).mkdir(parents=True, exist_ok=True)
 
-    # Create environment
+    # Create environment with balanced rewards for fair comparison
+    # Higher arrival rate (3.0) creates more resource contention and queueing
+    # This makes deadline-aware policies significantly better than naive ones
     env = CloudResourceEnv(
         n_vms=10,
         n_availability_zones=3,
         max_episode_steps=200,
-        arrival_rate=2.0,
+        arrival_rate=3.0,  # Increased from 2.0 to create more pressure
         vm_failure_rate=0.001,
+        reward_weights={
+            'utilization': 2.0,
+            'sla_violation': -3.0,
+            'energy_cost': -0.005,
+            'queue_length': -0.02,
+            'completion': 2.0,
+        },
         seed=args.seed,
     )
 
@@ -244,15 +276,18 @@ def main():
         results = evaluator.evaluate_heuristic_policy(policy_class, policy_name)
         all_results.append(results)
 
-    # Evaluate RL policies if models exist
+    # Evaluate RL policies if models exist (check both baseline and improved versions)
     rl_policies = [
-        ("ppo", "PPO"),
-        ("a2c", "A2C"),
-        ("dqn", "DQN"),
+        ("ppo", "PPO", "ppo"),
+        ("a2c", "A2C", "a2c"),
+        ("dqn", "DQN", "dqn"),
+        ("ppo", "PPO_Improved", "ppo_improved"),
+        ("a2c", "A2C_Improved", "a2c_improved"),
+        ("dqn", "DQN_Improved", "dqn_improved"),
     ]
 
-    for algorithm, policy_name in rl_policies:
-        model_path = Path(args.model_dir) / algorithm / f"{algorithm}_final.zip"
+    for algorithm, policy_name, folder_name in rl_policies:
+        model_path = Path(args.model_dir) / folder_name / f"{algorithm}_final.zip"
         if model_path.exists():
             results = evaluator.evaluate_rl_policy(
                 model_path=str(model_path),
@@ -293,9 +328,13 @@ def main():
     ranked_by_completion = results_df.sort_values('mean_completion_rate', ascending=False)
     print(ranked_by_completion[['policy_name', 'mean_completion_rate', 'std_completion_rate']].to_string(index=False))
 
-    print("\nBy SLA Satisfaction Rate:")
+    print("\nBy SLA Satisfaction Rate (Completed Tasks Only):")
     ranked_by_sla = results_df.sort_values('mean_sla_satisfaction_rate', ascending=False)
     print(ranked_by_sla[['policy_name', 'mean_sla_satisfaction_rate', 'std_sla_satisfaction_rate']].to_string(index=False))
+
+    print("\nBy Overall SLA Success (Includes Rejections as Failures - BETTER METRIC):")
+    ranked_by_overall_sla = results_df.sort_values('mean_overall_sla_success', ascending=False)
+    print(ranked_by_overall_sla[['policy_name', 'mean_overall_sla_success', 'std_overall_sla_success', 'mean_completion_rate']].to_string(index=False))
 
 
 if __name__ == "__main__":

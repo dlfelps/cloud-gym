@@ -28,6 +28,7 @@ class CloudResourceEnv(gym.Env):
         arrival_rate: float = 2.0,
         vm_failure_rate: float = 0.001,
         reward_weights: Optional[dict] = None,
+        priority_distribution: Optional[tuple[float, float, float]] = None,
         seed: Optional[int] = None,
     ):
         """
@@ -67,9 +68,13 @@ class CloudResourceEnv(gym.Env):
         self._initialize_vms()
 
         # Task management
+        # Default: (0.5, 0.3, 0.2) = 50% LOW, 30% MEDIUM, 20% HIGH
+        # Challenging: (0.2, 0.3, 0.5) = 20% LOW, 30% MEDIUM, 50% HIGH (more tight deadlines)
+        priority_probs = priority_distribution or (0.5, 0.3, 0.2)
         self.task_generator = TaskGenerator(
             rng=self.rng,
             arrival_rate=arrival_rate,
+            priority_probs=priority_probs,
         )
         self.pending_tasks: list[Task] = []
         self.running_tasks: dict[int, Task] = {}  # task_id -> Task
@@ -93,6 +98,8 @@ class CloudResourceEnv(gym.Env):
             'completed_tasks': 0,
             'rejected_tasks': 0,
             'sla_violations': 0,
+            'tasks_with_deadlines': 0,
+            'deadline_met': 0,
             'total_energy_cost': 0.0,
             'total_vm_cost': 0.0,
         }
@@ -179,6 +186,8 @@ class CloudResourceEnv(gym.Env):
             'completed_tasks': 0,
             'rejected_tasks': 0,
             'sla_violations': 0,
+            'tasks_with_deadlines': 0,
+            'deadline_met': 0,
             'total_energy_cost': 0.0,
             'total_vm_cost': 0.0,
         }
@@ -250,8 +259,14 @@ class CloudResourceEnv(gym.Env):
             # Reject task
             self.rejected_tasks.append(task)
             self.episode_metrics['rejected_tasks'] += 1
-            # Penalty based on priority
-            penalty = {Priority.LOW: -0.1, Priority.MEDIUM: -0.5, Priority.HIGH: -2.0}
+            # VERY STRONG penalty based on priority (prevents 44% rejection equilibrium)
+            # Rejection must be MUCH WORSE than attempting and risking SLA violation
+            # Math: With these penalties, attempting (even with 50% failure rate) is better
+            penalty = {
+                Priority.LOW: -5.0,      # Was -2.0 (2.5x increase)
+                Priority.MEDIUM: -15.0,  # Was -5.0 (3x increase)
+                Priority.HIGH: -25.0     # Was -10.0 (2.5x increase)
+            }
             reward += penalty[task.priority]
 
         elif action == self.n_vms + 1:
@@ -282,6 +297,12 @@ class CloudResourceEnv(gym.Env):
                 vm = self.vms[task.assigned_vm]
                 vm.deallocate(task)
 
+                # Track deadline metrics
+                if task.deadline is not None:
+                    self.episode_metrics['tasks_with_deadlines'] += 1
+                    if self.current_time <= task.deadline:
+                        self.episode_metrics['deadline_met'] += 1
+
                 # Reward based on priority and SLA
                 if task.deadline and self.current_time > task.deadline:
                     # SLA violation
@@ -289,10 +310,11 @@ class CloudResourceEnv(gym.Env):
                     reward += self.reward_weights['sla_violation']
                 else:
                     # Successful completion
+                    # Increased rewards to make attempting more attractive than rejecting
                     priority_bonus = {
-                        Priority.LOW: 0.5,
-                        Priority.MEDIUM: 1.0,
-                        Priority.HIGH: 2.0
+                        Priority.LOW: 1.0,      # Was 0.5 (2x increase)
+                        Priority.MEDIUM: 3.0,   # Was 1.0 (3x increase)
+                        Priority.HIGH: 8.0      # Was 2.0 (4x increase)
                     }
                     reward += self.reward_weights['completion'] * priority_bonus[task.priority]
 
@@ -316,8 +338,21 @@ class CloudResourceEnv(gym.Env):
         reward += self.reward_weights['utilization'] * avg_cluster_utilization
 
         # Energy and cost penalties
-        energy_cost = sum(vm.config.power_watts for vm in self.vms if vm.is_operational) / 1000.0
-        vm_cost = sum(vm.config.cost_per_hour for vm in self.vms if vm.is_operational) / 60.0
+        # FIXED: Charge based on VMs with running tasks (idle VMs use less power)
+        # VMs with tasks: full power, idle VMs: 20% standby power
+        energy_cost = 0.0
+        vm_cost = 0.0
+        for vm in self.vms:
+            if vm.is_operational:
+                if len(vm.running_tasks) > 0:
+                    # VM actively running tasks: full cost
+                    energy_cost += vm.config.power_watts / 1000.0
+                    vm_cost += vm.config.cost_per_hour / 60.0
+                else:
+                    # VM idle: only standby power (20% of full)
+                    energy_cost += (vm.config.power_watts * 0.2) / 1000.0
+                    vm_cost += (vm.config.cost_per_hour * 0.2) / 60.0
+
         self.episode_metrics['total_energy_cost'] += energy_cost
         self.episode_metrics['total_vm_cost'] += vm_cost
         reward += self.reward_weights['energy_cost'] * (energy_cost + vm_cost)

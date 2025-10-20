@@ -15,6 +15,7 @@ dependencies = [
     "seaborn>=0.12.0",
     "tqdm>=4.65.0",
     "tensorboard>=2.20.0",
+    "rich>=14.2.0",
 ]
 
 [project.optional-dependencies]
@@ -27,6 +28,7 @@ dev = [
 [project.scripts]
 cloud-gym-demo = "main:main"
 cloud-gym-train = "scripts.train_rl_baseline:main"
+cloud-gym-train-improved = "scripts.train_all_improved:main"
 cloud-gym-eval = "scripts.evaluate_baselines:main"
 cloud-gym-viz = "scripts.visualize_results:main"
 

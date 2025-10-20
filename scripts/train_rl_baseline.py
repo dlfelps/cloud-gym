@@ -12,15 +12,27 @@ import gymnasium as gym
 from cloud_resource_gym.envs.cloud_env import CloudResourceEnv
 
 
-def make_env(seed: int = 0):
+def make_env(seed: int = 0, use_balanced_rewards: bool = True):
     """Create and wrap the environment."""
     def _init():
+        # Use same balanced reward weights as improved script for fair comparison
+        reward_weights = None
+        if use_balanced_rewards:
+            reward_weights = {
+                'utilization': 2.0,
+                'sla_violation': -3.0,
+                'energy_cost': -0.005,
+                'queue_length': -0.02,
+                'completion': 2.0,
+            }
+
         env = CloudResourceEnv(
             n_vms=10,
             n_availability_zones=3,
             max_episode_steps=200,
             arrival_rate=2.0,
             vm_failure_rate=0.001,
+            reward_weights=reward_weights,
             seed=seed,
         )
         env = Monitor(env)
