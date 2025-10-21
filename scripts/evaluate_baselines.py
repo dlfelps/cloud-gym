@@ -276,18 +276,14 @@ def main():
         results = evaluator.evaluate_heuristic_policy(policy_class, policy_name)
         all_results.append(results)
 
-    # Evaluate RL policies if models exist (check both baseline and improved versions)
+    # Evaluate RL policies if models exist
     rl_policies = [
-        ("ppo", "PPO", "ppo"),
-        ("a2c", "A2C", "a2c"),
-        ("dqn", "DQN", "dqn"),
-        ("ppo", "PPO_Improved", "ppo_improved"),
-        ("a2c", "A2C_Improved", "a2c_improved"),
-        ("dqn", "DQN_Improved", "dqn_improved"),
+        ("ppo", "PPO", Path(args.model_dir) / "ppo_improved/ppo_final.zip"),
+        ("a2c", "A2C", Path(args.model_dir) / "winners/a2c_high_entropy_500k/a2c_high_entropy_final.zip"),
+        ("dqn", "DQN", Path(args.model_dir) / "winners/dqn_high_lr_500k/dqn_high_lr_final.zip"),
     ]
 
-    for algorithm, policy_name, folder_name in rl_policies:
-        model_path = Path(args.model_dir) / folder_name / f"{algorithm}_final.zip"
+    for algorithm, policy_name, model_path in rl_policies:
         if model_path.exists():
             results = evaluator.evaluate_rl_policy(
                 model_path=str(model_path),
